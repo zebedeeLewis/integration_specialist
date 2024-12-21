@@ -10,6 +10,8 @@ services:
     environment:
       - ACCEPT_EULA=Y
       - MSSQL_SA_PASSWORD=${DB_PASSWORD}
+    networks:
+      - mssqlnet
 
   script:
     container_name: my_script
@@ -19,8 +21,15 @@ services:
       - DB_HOST=mssql
       - DB_USER=${DB_USER}
       - DB_PASSWORD=${DB_PASSWORD} 
-      - DB_CONTEXT=master
+      - DB_CONTEXT=${DB_CONTEXT}
     build:
+      context: .
       tags:
         - "my:script"
-      context: .
+    networks:
+      - mssqlnet
+
+networks:
+  mssqlnet:
+    name: mssqlnet
+    driver: bridge
