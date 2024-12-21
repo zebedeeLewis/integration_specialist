@@ -1,0 +1,26 @@
+services:
+  mssql:
+    attach: false
+    image: "mcr.microsoft.com/mssql/server:2022-latest"
+    domainname: mssql
+    hostname: mssql
+    container_name: mssql
+    ports: 
+      - "1433:1433"
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=${DB_PASSWORD}
+
+  script:
+    container_name: my_script
+    depends_on:
+      - mssql
+    environment:
+      - DB_HOST=mssql
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD} 
+      - DB_CONTEXT=master
+    build:
+      tags:
+        - "my:script"
+      context: .
