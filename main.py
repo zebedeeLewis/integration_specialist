@@ -3,6 +3,27 @@
 import pyodbc
 import os
 
+FIELDS = {
+  "vehicle_identification_number": "VARCHAR(17) UNIQUE NOT NULL",
+  "make":                          "VARCHAR(32) NOT NULL",
+  "model":                         "VARCHAR(32) NOT NULL",
+  "year":                          "SMALLINT NOT NULL",
+  "mileage":                       "INT NOT NULL",
+  "price":                         "MONEY NOT NULL",
+  "condition":                     "VARCHAR(32) NOT NULL",
+  "color":                         "VARCHAR(32) NOT NULL",
+  "interior_color":                "VARCHAR(32) NOT NULL",
+  "engine":                        "VARCHAR(32) NOT NULL",
+  "transmission":                  "VARCHAR(32) NOT NULL",
+  "drive_train":                   "VARCHAR(32) NOT NULL",
+  "fuel_type":                     "VARCHAR(32) NOT NULL",
+  "body_style":                    "VARCHAR(32) NOT NULL",
+  "number_of_seats":               "TINYINT NOT NULL",
+  "doors":                         "TINYINT NOT NULL",
+  "stock_number":                  "INT NOT NULL PRIMARY KEY IDENTITY(1, 1)",
+  "notes":                         "VARCHAR(256)",
+}
+
 class colors:
   HEADER = '\033[95m'
   OKBLUE = '\033[94m'
@@ -29,18 +50,24 @@ connectionString = (
   f'UID={USERNAME};' +
   f'PWD={PASSWORD}')
 
-def create_table(cursor, table_name):
+
+def create_table(cursor, table_name, fields):
   print(f'{colors.OKBLUE}[[INFO]]: attempting to create table "{table_name}"{colors.ENDC}')
-  query = f"CREATE TABLE {table_name} (col1 varchar(128), col2 varchar(128))"
+  query = (
+    f"CREATE TABLE {table_name} ("+
+    ', '.join([' '.join(x) for x in fields.items()]) +
+    ')' )
+
   try:
     cursor.execute(query).commit()
-  except:
+  except Exception as e:
     print(f'{colors.FAIL}[[ERROR]]: while attempting to create table {table_name}.{colors.ENDC}')
     print(f'\t{colors.FAIL}{e}{colors.ENDC}')
     return None
 
   print(f'{colors.OKBLUE}[[INFO]]: successfuly created table "{table_name}"{colors.ENDC}')
   return cursor
+
 
 def check_if_table_exists(cursor, table_name):
   print(f'{colors.OKBLUE}[[INFO]]: checking if table "{table_name}" exists.{colors.ENDC}')
@@ -86,11 +113,12 @@ def main():
   if table_names == None:
     exit(2)
 
-  cursor = create_table(cursor, INVENTORY_TABLE) if len(table_names) == 0 else cursor
+  cursor = create_table(cursor, INVENTORY_TABLE, FIELDS) if len(table_names) == 0 else cursor
   if cursor == None:
     exit(3)
 
   conn.close()
+
 
 if __name__ == "__main__":
   main()
