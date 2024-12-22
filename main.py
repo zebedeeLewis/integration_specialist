@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 
+import pdb
+
+import re
 import os
 import os.path
 from functools import reduce
 
 import pyodbc
 from google.oauth2 import service_account
-# from google.auth.transport.requests import Request
-# from google.oauth2.credentials import Credentials
-# from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -31,6 +31,33 @@ FIELDS = {
   "doors":                         "TINYINT NOT NULL",
   "stock_number":                  "INT NOT NULL PRIMARY KEY IDENTITY(1, 1)",
   "notes":                         "VARCHAR(256)",
+}
+
+
+TRANSFORMS = {
+  4: [
+    lambda s: s.strip().replace(',', ''),
+  ],
+  10: [
+    lambda s: s.replace('CVT', 'Automatic'),
+  ],
+  11: [
+    lambda s: s.replace('Four-Wheel Drive', '4WD'),
+    lambda s: s.replace('All-Wheel Drive', 'AWD'),
+    lambda s: s.replace('Rear-Wheel Drive', 'RWD'),
+    lambda s: s.replace('Front-Wheel Drive', 'FWD'),
+  ],
+  12: [
+    lambda s: s.replace('Plug-in Hybrid', 'Hybrid'),
+  ],
+  13: [
+    lambda s: s.replace('Pickup Truck', 'Pickup'),
+  ],
+  16: [
+    lambda s: r''.format(s),
+  ],
+  -1: [
+  ]
 }
 
 
@@ -63,7 +90,7 @@ connectionString = (
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
 SERVICE_ACCOUNT_FILE = './credentials.json'
 
-SPREADSHEET_ID = os.getenv("GOODLE_SHEET_ID")
+SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 RANGE = "A2:Q157"
 
 
@@ -84,6 +111,19 @@ def create_table(cursor, table_name, fields):
   print(f'{colors.OKBLUE}[[INFO]]: successfuly created table "{table_name}"{colors.ENDC}')
   return cursor
 
+
+def find_duplicates(cursor, table_name, field, value):
+  query = (
+    f'SELECT * FROM {table_name} '
+    f'WHERE {field} = "{value}"' )
+  print(query)
+
+  pdb.set_trace()
+
+  rows = cursor.execute(query).fetchall()
+  return rows
+
+
 def insert_rows_into_table(cursor, table_name, rows):
   print(f'{colors.OKBLUE}[[INFO]]: attempting to insert data into table "{table_name}"{colors.ENDC}')
   query = (
@@ -92,6 +132,19 @@ def insert_rows_into_table(cursor, table_name, rows):
 
   try:
     cursor.execute(query).commit()
+  except pyodbc.IntegrityError as e:
+    print(f'{colors.FAIL}[[ERROR]]: while attempting to insert data into table {table_name}.{colors.ENDC}')
+    print(f'{colors.FAIL}\tfound duplicate record.{table_name}.{colors.ENDC}')
+
+    m = re.match(
+      r".*Violation of UNIQUE KEY constraint.*duplicate key in object "
+      r"'dbo.(.*)'.* key value is \((.*)\)\.", e.args[1])
+
+    if m:
+      field, value = m.groups()
+      rows = find_duplicates(cursor, table_name, field, value)
+      pdb.set_trace()
+
   except Exception as e:
     print(f'{colors.FAIL}[[ERROR]]: while attempting to insert data into table {table_name}.{colors.ENDC}')
     print(f'\t{colors.FAIL}{e}{colors.ENDC}')
@@ -155,38 +208,17 @@ def get_data():
   return values
 
 
-def normalize_number(s):
-  return s.strip().replace(',', '')
-
-
-TRANSFORMS = {
-  4: [normalize_number],
-  10: [
-    lambda s: s.replace('CVT', 'Automatic'),
-  ],
-  11: [
-    lambda s: s.replace('Four-Wheel Drive', '4WD'),
-    lambda s: s.replace('All-Wheel Drive', 'AWD'),
-    lambda s: s.replace('Rear-Wheel Drive', 'RWD'),
-    lambda s: s.replace('Front-Wheel Drive', 'FWD'),
-  ],
-  12: [
-    lambda s: s.replace('Plug-in Hybrid', 'Hybrid'),
-  ],
-  13: [
-    lambda s: s.replace('Pickup Truck', 'Pickup'),
-  ],
-  16: [
-    lambda s: r''.format(s),
-  ],
-
-}
+def list_get(l, i):
+  try:
+    return l[i]
+  except:
+    return ''
 
 
 def apply_transforms(transforms, row):
   return [ 
-    reduce((lambda acc, fn: fn(acc)) ,transforms.get(i, [lambda _:_]), c)
-    for i, c in enumerate(row)
+    reduce((lambda acc, fn: fn(acc)) ,transforms.get(i, [lambda _:_]) + transforms[-1], c)
+    for i, c in enumerate([list_get(row, i) for i in range(17)]) # make sure all rows are same length
   ]
 
 
