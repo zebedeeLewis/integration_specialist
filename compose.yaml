@@ -11,25 +11,33 @@ services:
       - ACCEPT_EULA=Y
       - MSSQL_SA_PASSWORD=${DB_PASSWORD}
     networks:
-      - mssqlnet
+      mssqlnet:
+        ipv4_address: 192.168.128.3
 
   script:
     container_name: my_script
     depends_on:
       - mssql
     environment:
-      - DB_HOST=mssql
+      - DB_HOST=192.168.128.3
       - DB_USER=${DB_USER}
       - DB_PASSWORD=${DB_PASSWORD} 
       - DB_CONTEXT=${DB_CONTEXT}
+      - GOOGLE_SHEET_ID=${GOOGLE_SHEET_ID}
+      - GOOGLE_SHEET_RANGE=${GOOGLE_SHEET_RANGE}
+
     build:
       context: .
       tags:
         - "my:script"
     networks:
-      - mssqlnet
+      mssqlnet:
+        ipv4_address: 192.168.128.4
 
 networks:
   mssqlnet:
     name: mssqlnet
     driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.128.0/24
