@@ -10,21 +10,17 @@ from functools import reduce
 import pyodbc
 import sqlalchemy as sa
 from sqlalchemy.orm import DeclarativeBase, sessionmaker, mapped_column, MappedAsDataclass, Mapped
-from sqlalchemy import Table, select, Column, Integer, String, Identity
+from sqlalchemy import select, Integer, String, Identity
 from sqlalchemy.dialects.mssql import TINYINT, VARCHAR, SMALLINT, MONEY
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-INVENTORY_TABLE = "vehicle_inventory"
 
-
-class Base(MappedAsDataclass, DeclarativeBase):
-    pass
-
+class Base(MappedAsDataclass, DeclarativeBase): pass
 
 class VehicleInventory(Base):
-  __tablename__                  = INVENTORY_TABLE
+  __tablename__                 = "vehicle_inventory"
 
   vehicle_identification_number : Mapped[str] = mapped_column(VARCHAR(17), unique=True, nullable=False)
   make                          : Mapped[str] = mapped_column(VARCHAR(32), nullable=False)
@@ -74,40 +70,53 @@ TRANSFORMS = {
 }
 
 
-class colors:
-  HEADER = '\033[95m'
-  OKBLUE = '\033[94m'
-  OKCYAN = '\033[96m'
-  OKGREEN = '\033[92m'
-  WARNING = '\033[93m'
-  FAIL = '\033[91m'
-  ENDC = '\033[0m'
-  BOLD = '\033[1m'
-  UNDERLINE = '\033[4m'
-
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
+SERVICE_ACCOUNT_FILE = './credentials.json'
 
 SERVER = os.getenv("DB_HOST")
 DB = os.getenv("DB_CONTEXT")
 USER = os.getenv("DB_USER")
 PWD = os.getenv("DB_PASSWORD")
 
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
-SERVICE_ACCOUNT_FILE = './credentials.json'
-
 SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 RANGE = os.getenv("GOOGLE_SHEET_RANGE")
 
 
+def format_log(message, level="info"):
+  class colors:
+    info = '\033[94m'
+    ok = '\033[92m'
+    warn = '\033[93m'
+    err = '\033[91m'
+    endc = '\033[0m'
+
+  match level:
+    case "error":
+      prefix = "[[ERROR]]: "
+      color = colors.err
+    case "warning":
+      prefix = "[[WARNING]]: "
+      color = colors.warn
+    case _:
+      prefix = "[[INFO]]: "
+      color = colors.info
+
+  final_message = f"{color}{prefix}{message}{colors.endc}"
+
+  print(final_message)
+
+
+
 def create_table(session, table):
-  print(f'{colors.OKBLUE}[[INFO]]: attempting to create table "{table.name}"{colors.ENDC}')
+  format_log(f'attempting to create table "{table.name}"')
+
   try:
     table.create(session.connection().engine)
   except Exception as e:
-    print(f'{colors.FAIL}[[ERROR]]: while attempting to create table {table.name}.{colors.ENDC}')
-    print(f'\t{colors.FAIL}{e}{colors.ENDC}')
+    format_log(f'while attempting to create table {table.name}.\n\t{e}', "error")
     return None
 
-  print(f'{colors.OKBLUE}[[INFO]]: successfuly created table "{table.name}"{colors.ENDC}')
+  format_log(f'successfuly created table "{table.name}".')
   return session
 
 
@@ -121,64 +130,68 @@ def find_duplicates(cursor, table_name, field, value):
 
 
 def insert_rows_into_table(session, table_name, rows):
-  print(f'{colors.OKBLUE}[[INFO]]: attempting to insert data into table "{table_name}"{colors.ENDC}')
+  format_log(f'attempting to insert data into table "{table_name}".')
 
   try:
     for row in rows:
       vin = row.vehicle_identification_number
       duplicate = session.scalars(
-          select(VehicleInventory).filter_by(vehicle_identification_number=vin) ).all()
+          select(VehicleInventory).filter_by(vehicle_identification_number=vin)
+      ).all()
 
       if not duplicate:
         session.add(row)
         session.commit()
 
   except Exception as e:
-    print(f'{colors.FAIL}[[ERROR]]: while attempting to insert data into table {table_name}.{colors.ENDC}')
-    print(f'\t{colors.FAIL}{e}{colors.ENDC}')
+    format_log(
+      f'while attempting to insert data into table {table_name}.\n\t{e}',
+      "error")
+
     return None
 
-  print(f'{colors.OKBLUE}[[INFO]]: successfuly inserted data into table "{table_name}"{colors.ENDC}')
+  format_log(f'successfuly inserted data into table "{table_name}".')
   return session
 
 
 def check_if_table_exists(conn, table_name):
-  print(f'{colors.OKBLUE}[[INFO]]: checking if table "{table_name}" exists.{colors.ENDC}')
+  format_log(f'checking if table "{table_name}" exists.')
 
   query = f"SELECT name FROM sys.tables WHERE name = '{table_name}'"
   try:
     res = [x for x in conn.execute(sa.text(query)).mappings()]
   except Exception as e: 
-    print(f'{colors.FAIL}[[ERROR]]: while checking existence of table.{colors.ENDC}')
-    print(f'\t{colors.FAIL}{e}{colors.ENDC}')
+    format_log(f'while checking existence of table.\n\t{e}', "error")
     return None
 
+  msg = f'table already "{table_name}" exists.'
   if not res:
-    print(f'{colors.OKBLUE}[[INFO]]: table "{table_name}" does not exist.{colors.ENDC}')
-    return []
-  else:
-    print(f'{colors.OKBLUE}[[INFO]]: table already "{table_name}" exists.{colors.ENDC}')
-    return res
+    msg = f'table "{table_name}" does not exist.'
+    res = []
+
+  format_log(msg)
+  return res
 
 
 def start_session(server, db, user, pwd):
-  print(f'{colors.OKBLUE}[[INFO]]: attempting database connection using connection string:\n{colors.ENDC}')
+  format_log('Starting new database session.')
 
-  driver = pyodbc.drivers()[0].replace(' ', '+')
   connectionString = (
-    f'mssql+pyodbc://{USER}:{PWD}@{SERVER}/{DB}?driver={driver}&TrustServerCertificate=no&encrypt=no')
-  print(connectionString)
+    f'mssql+pyodbc://{USER}:{PWD}@{SERVER}/{DB}'
+    f'?driver={pyodbc.drivers()[0].replace(" ", "+")}'
+     '&TrustServerCertificate=no&encrypt=no')
+
+  format_log(connectionString)
 
   try:
     engine = sa.create_engine(connectionString)
     Session = sessionmaker(engine)
     session = Session()
   except Exception as e:
-    print(f'{colors.FAIL}[[ERROR]]: failed to connect to database.{colors.ENDC}')
-    print(f'\t{colors.FAIL}{e}{colors.ENDC}')
+    format_log(f'Failed to start database session.\n\t{e}', "error")
     return None
 
-  print(f'{colors.OKBLUE}[[INFO]]: successfuly connected to database.{colors.ENDC}')
+  format_log(f'successfuly connected to database.')
   return session
   
 
@@ -197,7 +210,7 @@ def get_data():
            .get("values", []) )
 
   except HttpError as err:
-    print(err)
+    format_log(err, "error")
     return None
 
   return values
@@ -222,7 +235,7 @@ def main():
   if session == None:
     exit(1)
 
-  table_names = check_if_table_exists(session, INVENTORY_TABLE)
+  table_names = check_if_table_exists(session, VehicleInventory.__tablename__)
   if table_names == None:
     exit(2)
 
@@ -235,7 +248,7 @@ def main():
     exit(4)
 
   transformed_rows = [VehicleInventory(*apply_transforms(TRANSFORMS, r)) for r in rows]
-  insert_rows_into_table(session, INVENTORY_TABLE, transformed_rows[:])
+  insert_rows_into_table(session, VehicleInventory.__tablename__, transformed_rows[:])
 
   session.close()
 
