@@ -8,6 +8,7 @@ RUN apk --no-cache add gpg-agent
 RUN apk --no-cache add gcc g++ libc-dev libffi-dev libxml2 unixodbc-dev
 
 ADD microsoft_obdc_setup.sh .
+ADD credentials.json .
 RUN mkdir -p '/opt/microsoft/msodbcsql18'
 RUN echo > '/opt/microsoft/msodbcsql18/ACCEPT_EULA'
 RUN source ./microsoft_obdc_setup.sh
