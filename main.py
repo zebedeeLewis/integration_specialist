@@ -28,6 +28,7 @@ load_dotenv()
 rbind = result.bind
 rmap = result.map
 map_error = result.map_error
+rswap = result.swap
 
 E_CREATE_TABLE = 1
 
@@ -157,13 +158,49 @@ class Log(BaseModel):
   @effect.result[list, int]()
   @staticmethod
   def write(log: Log) -> Result[Log, int]:
-      ꓸ( log
-       , Log.to_str
-       , print )
+    ꓸ(log,
+      Log.to_str,
+      print )
 
-      yield log
+    yield log
+
+  @curry(1)
+  @staticmethod
+  def xinfo(s: str, result: Result) -> Result:
+    return ꓸ(
+      result,
+      rbind(lambda r:ꓸ(
+        Log.from_str(s),
+        Log.format("info"),
+        Log.write,
+        rmap(lambda _: r) )))
 
 
+  @curry(1)
+  @staticmethod
+  def xerror(s: str, res: Result) -> Result:
+    return ꓸ(
+      res,
+      map_error(lambda r:ꓸ(
+        Log.from_str(s),
+        Log.format("error"),
+        Log.write,
+        rbind(lambda _: Error(r)) )))
+
+
+  @curry(1)
+  @staticmethod
+  def xwarning(s: str, result: Result) -> Result:
+    return ꓸ(
+      result,
+      rbind(lambda r:ꓸ(
+        Log.from_str(s),
+        Log.format("warning"),
+        Log.write,
+        rmap(lambda _: r) )))
+
+
+# str -> Result[A,E] -> Result[A,E]
 Log.info = λ(Log.from_str, Log.format("info"), Log.write)
 Log.error = λ(Log.from_str, Log.format("error"), Log.write)
 Log.warning = λ(Log.from_str, Log.format("error"), Log.write)
@@ -178,20 +215,19 @@ def sqlalchemy_create_table(table: Table, session: Session) -> Result[Session, i
     return Result.Error(e)
 
 
-@curry(1)
-def create_table(table: Table, session: Session) -> Result[Session, int]:
-  return ꓸ(
-    Log.info(f'attempting to create table "{table.name}"'),
-    rbind(lambda _: Ok(session)),
+def create_table(table: Table) -> Callable[[Session], Result[Session, int]]:
+  return λ(
+    Ok,
+    Log.xinfo(f'attempting to create table "{table.name}"'),
     rbind(sqlalchemy_create_table(table)),
-
-    map_error(lambda e:ꓸ(
-      Log.error(f'while attempting to create table {table.name}.\n\t{e}'),
+    Log.xerror(f'while attempting to create table {table.name}.\n\t'),
+    map_error(λ(
+      str,
+      Log.from_str,
+      Log.format("error"),
+      Log.write,
       rbind(lambda _: Error(E_CREATE_TABLE)) )),
-
-    rbind(lambda s: ꓸ(
-      Log.info(f'successfuly created table "{table.name}".'),
-      rbind(lambda _: s) )))
+    Log.xinfo(f'successfuly created table "{table.name}".') )
 
 
 def find_duplicates(cursor, table_name, field, value):
@@ -321,6 +357,7 @@ def main():
     exit(4)
 
   transformed_rows = [VehicleInventory(*apply_transforms(TRANSFORMS, r)) for r in rows]
+  
   insert_rows_into_table(session, VehicleInventory.__tablename__, transformed_rows[:])
 
   session.close()
