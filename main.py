@@ -8,14 +8,15 @@ import os.path
 from typing import Callable
 from functools import reduce
 
-from expression import effect, Result, curry, pipe as ꓸ, compose as λ 
+from expression import result, effect, Result, Ok, Error, curry, pipe as ꓸ, compose as λ 
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
 import pyodbc
 import sqlalchemy as sa
-from sqlalchemy.orm import DeclarativeBase, sessionmaker, mapped_column, MappedAsDataclass, Mapped
-from sqlalchemy import select, Integer, String, Identity
+from sqlalchemy.orm import (
+  DeclarativeBase, sessionmaker, Session, mapped_column, MappedAsDataclass, Mapped)
+from sqlalchemy import select, Integer, String, Identity, Table
 from sqlalchemy.dialects.mssql import TINYINT, VARCHAR, SMALLINT, MONEY
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -23,6 +24,12 @@ from googleapiclient.errors import HttpError
 
 
 load_dotenv()
+
+rbind = result.bind
+rmap = result.map
+map_error = result.map_error
+
+E_CREATE_TABLE = 1
 
 class Base(MappedAsDataclass, DeclarativeBase): pass
 
@@ -141,6 +148,12 @@ class Log(BaseModel):
             , )
 
 
+  @curry(1)
+  @staticmethod
+  def set_message(msg: str, log: Log) -> Log:
+    return Log(**{**log.model_dump(), 'message':msg})
+
+
   @effect.result[list, int]()
   @staticmethod
   def write(log: Log) -> Result[Log, int]:
@@ -156,17 +169,29 @@ Log.error = λ(Log.from_str, Log.format("error"), Log.write)
 Log.warning = λ(Log.from_str, Log.format("error"), Log.write)
 
 
-def create_table(session, table):
-  Log.info(f'attempting to create table "{table.name}"')
-
+@curry(1)
+def sqlalchemy_create_table(table: Table, session: Session) -> Result[Session, int]:
   try:
     table.create(session.connection().engine)
+    return Result.Ok(session)
   except Exception as e:
-    Log.error(f'while attempting to create table {table.name}.\n\t{e}')
-    return None
+    return Result.Error(e)
 
-  Log.info(f'successfuly created table "{table.name}".')
-  return session
+
+@curry(1)
+def create_table(table: Table, session: Session) -> Result[Session, int]:
+  return ꓸ(
+    Log.info(f'attempting to create table "{table.name}"'),
+    rbind(lambda _: Ok(session)),
+    rbind(sqlalchemy_create_table(table)),
+
+    map_error(lambda e:ꓸ(
+      Log.error(f'while attempting to create table {table.name}.\n\t{e}'),
+      rbind(lambda _: Error(E_CREATE_TABLE)) )),
+
+    rbind(lambda s: ꓸ(
+      Log.info(f'successfuly created table "{table.name}".'),
+      rbind(lambda _: s) )))
 
 
 def find_duplicates(cursor, table_name, field, value):
@@ -287,7 +312,7 @@ def main():
   if table_names == None:
     exit(2)
 
-  session = create_table(session, VehicleInventory.__table__) if len(table_names) == 0 else session
+  session = create_table(VehicleInventory.__table__)(session) if len(table_names) == 0 else session
   if session == None:
     exit(3)
 
