@@ -16,7 +16,7 @@ import pyodbc
 import sqlalchemy as sa
 from sqlalchemy.orm import (
   DeclarativeBase, sessionmaker, Session, mapped_column, MappedAsDataclass, Mapped)
-from sqlalchemy import select, Integer, String, Identity, Table
+from sqlalchemy import select, Engine, Integer, String, Identity, Table
 from sqlalchemy.dialects.mssql import TINYINT, VARCHAR, SMALLINT, MONEY
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -31,6 +31,8 @@ map_error = result.map_error
 rswap = result.swap
 
 E_CREATE_TABLE = 1
+E_INIT_ENGINE = 2
+E_INIT_SESSION = 2
 
 class Base(MappedAsDataclass, DeclarativeBase): pass
 
@@ -92,6 +94,11 @@ SERVER = os.getenv("DB_ADDRESS")
 DB = os.getenv("DB_NAME")
 USER = os.getenv("DB_USER")
 PWD = os.getenv("DB_PASSWORD")
+
+CONNECTION_STRING = (
+  f'mssql+pyodbc://{USER}:{PWD}@{SERVER}/{DB}'
+  f'?driver={pyodbc.drivers()[0].replace(" ", "+")}'
+   '&TrustServerCertificate=no&encrypt=no')
 
 SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 RANGE = os.getenv("GOOGLE_SHEET_RANGE")
@@ -166,7 +173,7 @@ class Log(BaseModel):
 
   @curry(1)
   @staticmethod
-  def xinfo(s: str, result: Result) -> Result:
+  def rinfo(s: str, result: Result) -> Result:
     return ꓸ(
       result,
       rbind(lambda r:ꓸ(
@@ -178,7 +185,7 @@ class Log(BaseModel):
 
   @curry(1)
   @staticmethod
-  def xerror(s: str, res: Result) -> Result:
+  def rerror(s: str, res: Result) -> Result:
     return ꓸ(
       res,
       map_error(lambda r:ꓸ(
@@ -190,7 +197,7 @@ class Log(BaseModel):
 
   @curry(1)
   @staticmethod
-  def xwarning(s: str, result: Result) -> Result:
+  def rwarning(s: str, result: Result) -> Result:
     return ꓸ(
       result,
       rbind(lambda r:ꓸ(
@@ -218,16 +225,16 @@ def sqlalchemy_create_table(table: Table, session: Session) -> Result[Session, i
 def create_table(table: Table) -> Callable[[Session], Result[Session, int]]:
   return λ(
     Ok,
-    Log.xinfo(f'attempting to create table "{table.name}"'),
+    Log.rinfo(f'Attempting to create table "{table.name}"'),
     rbind(sqlalchemy_create_table(table)),
-    Log.xerror(f'while attempting to create table {table.name}.\n\t'),
+    Log.rerror(f'While attempting to create table {table.name}.\n\t'),
     map_error(λ(
       str,
       Log.from_str,
       Log.format("error"),
       Log.write,
       rbind(lambda _: Error(E_CREATE_TABLE)) )),
-    Log.xinfo(f'successfuly created table "{table.name}".') )
+    Log.rinfo(f'Successfuly created table "{table.name}".') )
 
 
 def find_duplicates(cursor, table_name, field, value):
@@ -282,27 +289,47 @@ def check_if_table_exists(conn, table_name):
   return res
 
 
-def start_session(server, db, user, pwd):
-  Log.info('Starting new database session.')
-
-  connectionString = (
-    f'mssql+pyodbc://{USER}:{PWD}@{SERVER}/{DB}'
-    f'?driver={pyodbc.drivers()[0].replace(" ", "+")}'
-     '&TrustServerCertificate=no&encrypt=no')
-
-  Log.info(connectionString)
-
+def sqlalchemy_init_db_engine(connectionString: s) -> Result[Engine, Exception]:
   try:
-    engine = sa.create_engine(connectionString)
-    Session = sessionmaker(engine)
-    session = Session()
+    return Ok(sa.create_engine(connectionString))
   except Exception as e:
-    Log.error(f'Failed to start database session.\n\t{e}')
-    return None
+    return Error(e)
 
-  Log.info(f'successfuly connected to database.')
-  return session
-  
+
+def sqlalchemy_init_db_session(engine: Engine) -> Result[Session, Exception]:
+  try:
+    return Ok(sessionmaker(engine)())
+  except Exception as e:
+    return Error(e)
+
+
+def start_session(connection_string: string) -> Result[Session, int]:
+  return ꓸ(
+    Ok(connection_string),
+    Log.rinfo('Initializing database engine.'),
+    rbind(sqlalchemy_init_db_engine),
+    Log.rerror('While initializing database engine.'),
+    map_error(λ(
+      str,
+      Log.from_str,
+      Log.format("error"),
+      Log.write,
+      rbind(lambda _: Error(E_INIT_ENGINE)) )),
+
+    rbind(λ(
+      Ok,
+      Log.rinfo('Successfuly initialized database engine.'),
+      Log.rinfo('Initializing database session.'),
+      rbind(sqlalchemy_init_db_session),
+      Log.rerror('While initializing database session.'),
+      map_error(λ(
+        str,
+        Log.from_str,
+        Log.format("error"),
+        Log.write,
+        rbind(lambda _: Error(E_INIT_SESSION)) )),
+      Log.rinfo('Successfuly initialized database session.') )))
+
 
 def get_data():
   creds = service_account.Credentials.from_service_account_file(
@@ -340,15 +367,18 @@ def apply_transforms(transforms, row):
 
 
 def main():
-  session = start_session(SERVER, DB, USER, PWD)
-  if session == None:
-    exit(1)
+  session = ꓸ(
+    start_session(CONNECTION_STRING),
+    lambda x: x.default_value(None) )
 
   table_names = check_if_table_exists(session, VehicleInventory.__tablename__)
   if table_names == None:
     exit(2)
 
-  session = create_table(VehicleInventory.__table__)(session) if len(table_names) == 0 else session
+  session = ꓸ(
+    create_table(VehicleInventory.__table__)(session),
+    lambda x: x.default_value(None)) if len(table_names) == 0 else session
+
   if session == None:
     exit(3)
 
