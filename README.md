@@ -1,45 +1,47 @@
 # integration_specialist
-This is a simple script to pull dealer inventory data from a google sheet
-and populate a microsoft SQL database with the scraped data.
+This is a simple python script to pull dealer inventory data from 
+(this google sheet)[https://bit.ly/3DvEUWG] and populate a microsoft SQL database
+with the scraped data. The data goes through a set of transformations, targeting
+either entire rows or individual cells before being written to the database.
 
-## Deployment
+The script is built into a docker container and combined with a mssql server via
+docker-compose.
 
-For this script to work you must set up a google cloud account and create a cloud project.
-Then create a (service account key)[https://cloud.google.com/iam/docs/service-account-creds],
-saving it in a file named `credentials.json`.
+## Environment
 
-You must then use your service account email address to get access to
-(this google sheet)[https://bit.ly/3DvEUWG]. Then save the
-(spreadsheet id)[https://developers.google.com/sheets/api/guides/concepts] to the environment
-variable `GOOGLE_SHEET_ID`.
+A `.env` file can be used to set the value of environment variables. The following
+environment variable are used by the script:
 
-```sh
-export GOOGLE_SHEET_ID=<sheet id goes here>
-```
+- `GOOGLE_SHEET_ID`: the uique identifier for the google sheet containing the data.
+  For instruction on finding a google sheet id look
+  (here)[https://developers.google.com/sheets/api/guides/concepts].
 
-Set the environment variables needed by the data parser script:
-```sh
-export GOOGLE_SHEET_RANGE='A2:Q157'
-export DB_USER=sa
-export DB_PASSWORD='$Up3rC00lH4ck3rP455w0rd'
-export DB_CONTEXT=master
-```
+- `GOOGLE_SHEET_RANGE`: defines the cell range on the given google sheet that contains
+  the data. (Note: make sure the given range includes all the table columns and rows 
+  you would like to include)
 
-Build and deploy the containers:
-```sh
-docker-compose up --build
-```
+- `DEBUG`: if set to `0`, then the script will print update messages to the screen
+  before and after each step. Otherwise, nothing will be printed to the screen.
 
-Clean up when you're done:
-```sh
-docker-compose down
-```
+- `SUBNET`: the subnet on which the two docker containers will be. make sure the
+  `DB_ADDRESS` value below is on this subnet.
 
-## Development
+- `DB_ADDRESS`: domain name or ip address of the microsft sql server. Make sure the
+  given address is on the given `SUBNET` value.
 
-### Linux Setup
-1. Setup ODBC by following instructions [here](https://bit.ly/4gqriKT).
+- `DB_NAME`: the name of the database where the scraped data will be written to.
 
+- `DB_USER`: the user name used to connect to the database.
+
+- `DB_PASSWORD`: the password used to connect to the database.
+
+
+
+## Running The Script
+
+### On Local/Development Machine
+
+1. Follow the instructions [here](https://bit.ly/4gqriKT) to setup microsft server ODBC.
 2. create new virtual environment ([see here](https://virtualenvwrapper.readthedocs.io/en/latest/)
    for instructions on installing `virtualenvwraper`):
 ```sh
@@ -54,25 +56,53 @@ pip install -r ./requirements.txt
 4. Set the environment variables needed by the data parser script:
 ```sh
 export DB_USER=sa
+export SUBNET='192.168.0.0/24'
+export DB_ADDRESS='192.168.0.4'
+export DB_USER=sa
+export DB_NAME=master
 export DB_PASSWORD=$Up3rC00lH4ck3rP455w0rd
+export GOOGLE_SHEET_ID='not so secret google sheet id'
+export GOOGLE_SHEET_RANGE='A2:Q157'
 ```
+
 5. Build and deploy the sql server container:
 ```sh
 docker-compose up --build -d mssql
 ```
 
-6. Get the database host environment variable from docker
-```sh
-export DB_HOST=$(docker inspect mssql -f json | jq -r ".[0].NetworkSettings.Networks.mssqlnet.IPAddress" -)
-```
-
-7. Run script:
+8. Run script:
 ```sh
 chmod +x ./main.py
 ./main.py
 ```
 
-8. Clean up when you're done:
+9. Clean up when you're done:
 ```sh
 docker-compose down
 ```
+
+
+### In Docker Container
+
+1. Set the environment variables needed by the data parser script:
+```sh
+export DB_USER=sa
+export SUBNET='192.168.0.0/24'
+export DB_ADDRESS='192.168.0.4'
+export DB_USER=sa
+export DB_NAME=master
+export DB_PASSWORD=$Up3rC00lH4ck3rP455w0rd
+export GOOGLE_SHEET_ID='not so secret google sheet id'
+export GOOGLE_SHEET_RANGE='A2:Q157'
+``
+
+2. Build and deploy the containers:
+```sh
+docker-compose up --build
+```
+
+3. Clean up when you're done:
+```sh
+docker-compose down
+```
+
