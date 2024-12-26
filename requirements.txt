@@ -15,6 +15,7 @@ pyasn1==0.6.1
 pyasn1_modules==0.4.1
 pyodbc==5.2.0
 pyparsing==3.2.0
+python-dotenv==1.0.1
 requests==2.32.3
 rsa==4.9
 SQLAlchemy==2.0.36

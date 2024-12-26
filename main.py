@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
 import pdb
-
 import re
 import os
 import os.path
@@ -15,7 +14,10 @@ from sqlalchemy.dialects.mssql import TINYINT, VARCHAR, SMALLINT, MONEY
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from dotenv import load_dotenv
 
+
+load_dotenv()
 
 class Base(MappedAsDataclass, DeclarativeBase): pass
 
@@ -73,8 +75,8 @@ TRANSFORMS = {
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
 SERVICE_ACCOUNT_FILE = './credentials.json'
 
-SERVER = os.getenv("DB_HOST")
-DB = os.getenv("DB_CONTEXT")
+SERVER = os.getenv("DB_ADDRESS")
+DB = os.getenv("DB_NAME")
 USER = os.getenv("DB_USER")
 PWD = os.getenv("DB_PASSWORD")
 
