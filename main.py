@@ -1,10 +1,16 @@
 #!/usr/bin/env python
+from __future__ import annotations
 
 import pdb
 import re
 import os
 import os.path
+from typing import Callable
 from functools import reduce
+
+from expression import effect, Result, curry, pipe as ꓸ, compose as λ 
+from pydantic import BaseModel
+from dotenv import load_dotenv
 
 import pyodbc
 import sqlalchemy as sa
@@ -14,7 +20,6 @@ from sqlalchemy.dialects.mssql import TINYINT, VARCHAR, SMALLINT, MONEY
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from dotenv import load_dotenv
 
 
 load_dotenv()
@@ -84,40 +89,83 @@ SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 RANGE = os.getenv("GOOGLE_SHEET_RANGE")
 
 
-def format_log(message, level="info"):
-  class colors:
-    info = '\033[94m'
-    ok = '\033[92m'
-    warn = '\033[93m'
-    err = '\033[91m'
-    endc = '\033[0m'
+class Log(BaseModel):
+  color: str = ''
+  prefix: str = ''
+  message: str = ''
 
-  match level:
-    case "error":
-      prefix = "[[ERROR]]: "
-      color = colors.err
-    case "warning":
-      prefix = "[[WARNING]]: "
-      color = colors.warn
-    case _:
-      prefix = "[[INFO]]: "
-      color = colors.info
+  @curry(1)
+  @staticmethod
+  def apply_level_prefix(log_level: str, log: Log) -> Log:
+    match(log_level):
+      case "error":
+        prefix = "[[ERROR]]: "
+      case "warning":
+        prefix = "[[WARNING]]: "
+      case _:
+        prefix = "[[INFO]]: "
 
-  final_message = f"{color}{prefix}{message}{colors.endc}"
+    return Log(**{**log.model_dump(), 'prefix':prefix})
 
-  print(final_message)
+
+  @staticmethod
+  def from_str(msg: str) -> Log:
+    return Log(message=msg)
+
+
+  @staticmethod
+  def to_str(log: Log) -> str:
+    return f'{log.color}{log.prefix}{log.message}\033[0m'
+
+
+  @curry(1)
+  @staticmethod
+  def apply_level_color(log_level: str, log: Log) -> Log:
+    match(log_level):
+      case "error":
+        color = '\033[91m'
+      case "warning":
+        color = '\033[93m'
+      case _:
+        color = '\033[94m'
+
+    return Log(**{**log.model_dump(), 'color':color})
+
+
+  # format the given message
+  # LogLevel -> Log -> Log
+  @staticmethod
+  def format(log_level: str) -> Callable[[Log], Log]:
+    return λ( Log.apply_level_prefix(log_level)
+            , Log.apply_level_color(log_level)
+            , )
+
+
+  @effect.result[list, int]()
+  @staticmethod
+  def write(log: Log) -> Result[Log, int]:
+      ꓸ( log
+       , Log.to_str
+       , print )
+
+      yield log
+
+
+Log.info = λ(Log.from_str, Log.format("info"), Log.write)
+Log.error = λ(Log.from_str, Log.format("error"), Log.write)
+Log.warning = λ(Log.from_str, Log.format("error"), Log.write)
 
 
 def create_table(session, table):
-  format_log(f'attempting to create table "{table.name}"')
+  Log.info(f'attempting to create table "{table.name}"')
 
   try:
     table.create(session.connection().engine)
   except Exception as e:
-    format_log(f'while attempting to create table {table.name}.\n\t{e}', "error")
+    Log.error(f'while attempting to create table {table.name}.\n\t{e}')
     return None
 
-  format_log(f'successfuly created table "{table.name}".')
+  Log.info(f'successfuly created table "{table.name}".')
   return session
 
 
@@ -131,7 +179,7 @@ def find_duplicates(cursor, table_name, field, value):
 
 
 def insert_rows_into_table(session, table_name, rows):
-  format_log(f'attempting to insert data into table "{table_name}".')
+  Log.info(f'attempting to insert data into table "{table_name}".')
 
   try:
     for row in rows:
@@ -145,24 +193,23 @@ def insert_rows_into_table(session, table_name, rows):
         session.commit()
 
   except Exception as e:
-    format_log(
-      f'while attempting to insert data into table {table_name}.\n\t{e}',
-      "error")
+    Log.error(
+      f'while attempting to insert data into table {table_name}.\n\t{e}')
 
     return None
 
-  format_log(f'successfuly inserted data into table "{table_name}".')
+  Log.info(f'successfuly inserted data into table "{table_name}".')
   return session
 
 
 def check_if_table_exists(conn, table_name):
-  format_log(f'checking if table "{table_name}" exists.')
+  Log.info(f'checking if table "{table_name}" exists.')
 
   query = f"SELECT name FROM sys.tables WHERE name = '{table_name}'"
   try:
     res = [x for x in conn.execute(sa.text(query)).mappings()]
   except Exception as e: 
-    format_log(f'while checking existence of table.\n\t{e}', "error")
+    Log.error(f'while checking existence of table.\n\t{e}')
     return None
 
   msg = f'table already "{table_name}" exists.'
@@ -170,29 +217,29 @@ def check_if_table_exists(conn, table_name):
     msg = f'table "{table_name}" does not exist.'
     res = []
 
-  format_log(msg)
+  Log.info(msg)
   return res
 
 
 def start_session(server, db, user, pwd):
-  format_log('Starting new database session.')
+  Log.info('Starting new database session.')
 
   connectionString = (
     f'mssql+pyodbc://{USER}:{PWD}@{SERVER}/{DB}'
     f'?driver={pyodbc.drivers()[0].replace(" ", "+")}'
      '&TrustServerCertificate=no&encrypt=no')
 
-  format_log(connectionString)
+  Log.info(connectionString)
 
   try:
     engine = sa.create_engine(connectionString)
     Session = sessionmaker(engine)
     session = Session()
   except Exception as e:
-    format_log(f'Failed to start database session.\n\t{e}', "error")
+    Log.error(f'Failed to start database session.\n\t{e}')
     return None
 
-  format_log(f'successfuly connected to database.')
+  Log.info(f'successfuly connected to database.')
   return session
   
 
@@ -211,7 +258,7 @@ def get_data():
            .get("values", []) )
 
   except HttpError as err:
-    format_log(err, "error")
+    Log.error(err)
     return None
 
   return values
