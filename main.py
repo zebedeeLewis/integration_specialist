@@ -30,6 +30,7 @@ rmap = result.map
 map_error = result.map_error
 rswap = result.swap
 
+
 E_CREATE_TABLE = 1
 E_INIT_ENGINE = 2
 E_INIT_SESSION = 2
@@ -171,9 +172,10 @@ class Log(BaseModel):
 
     yield log
 
+    
   @curry(1)
   @staticmethod
-  def rinfo(s: str, result: Result) -> Result:
+  def info_message(s: str, result: Result) -> Result:
     return ꓸ(
       result,
       rbind(lambda r:ꓸ(
@@ -185,7 +187,7 @@ class Log(BaseModel):
 
   @curry(1)
   @staticmethod
-  def rerror(s: str, res: Result) -> Result:
+  def error_message(s: str, res: Result) -> Result:
     return ꓸ(
       res,
       map_error(lambda r:ꓸ(
@@ -197,7 +199,7 @@ class Log(BaseModel):
 
   @curry(1)
   @staticmethod
-  def rwarning(s: str, result: Result) -> Result:
+  def warning_message(s: str, result: Result) -> Result:
     return ꓸ(
       result,
       rbind(lambda r:ꓸ(
@@ -207,10 +209,40 @@ class Log(BaseModel):
         rmap(lambda _: r) )))
 
 
+# Result[A, E] ->  Result[A, E]
+Log.exception = \
+  map_error(λ(
+   str,
+   Log.from_str,
+   Log.format("error"),
+   Log.write,
+     rbind(lambda _: Error(None)) ))
+
+
 # str -> Result[A,E] -> Result[A,E]
 Log.info = λ(Log.from_str, Log.format("info"), Log.write)
+
+
+# str -> Result[A,E] -> Result[A,E]
 Log.error = λ(Log.from_str, Log.format("error"), Log.write)
+
+
+# str -> Result[A,E] -> Result[A,E]
 Log.warning = λ(Log.from_str, Log.format("error"), Log.write)
+
+
+# Callable[[], A] -> Result[A,Exception]
+#
+# execute the given unary function, wrapping the result in Reslut.Ok.
+# Catches and wraps any exciption in a Result.Error.
+def try_catch(fn: Callable[[A], B]) -> Callable[[A], Result[B,Exception]]:
+  def _fn(a):
+    try:
+      return Ok(fn(a))
+    except Exception as e:
+      return Error(e)
+
+  return _fn
 
 
 @curry(1)
@@ -225,16 +257,12 @@ def sqlalchemy_create_table(table: Table, session: Session) -> Result[Session, i
 def create_table(table: Table) -> Callable[[Session], Result[Session, int]]:
   return λ(
     Ok,
-    Log.rinfo(f'Attempting to create table "{table.name}"'),
+    Log.info_message(f'Attempting to create table "{table.name}"'),
     rbind(sqlalchemy_create_table(table)),
-    Log.rerror(f'While attempting to create table {table.name}.\n\t'),
-    map_error(λ(
-      str,
-      Log.from_str,
-      Log.format("error"),
-      Log.write,
-      rbind(lambda _: Error(E_CREATE_TABLE)) )),
-    Log.rinfo(f'Successfuly created table "{table.name}".') )
+    Log.error_message(f'While attempting to create table {table.name}.'),
+    Log.exception,
+    map_error(lambda _:E_CREATE_TABLE),
+    Log.info_message(f'Successfuly created table "{table.name}".') )
 
 
 def find_duplicates(cursor, table_name, field, value):
@@ -289,46 +317,34 @@ def check_if_table_exists(conn, table_name):
   return res
 
 
-def sqlalchemy_init_db_engine(connectionString: s) -> Result[Engine, Exception]:
-  try:
-    return Ok(sa.create_engine(connectionString))
-  except Exception as e:
-    return Error(e)
+init_db_session = lambda engine:\
+  sessionmaker(engine)()
 
+# string -> Result[Session, int]
+# 
+# Produce a new database session.
+# 
+# Side Effects:
+# Prints progress logs as it attempts and either
+# succeed/fails to initialize a databse engine,
+# and subsequently initialize the new session.
+start_session = λ(
+  Ok,
+  Log.info_message('Initializing database engine.'),
+  rbind(try_catch(sa.create_engine)),
+  Log.info_message('Successfuly initialized database engine.'),
+  Log.error_message('While initializing database engine.'),
+  Log.exception,
+  map_error(lambda _:E_INIT_ENGINE),
 
-def sqlalchemy_init_db_session(engine: Engine) -> Result[Session, Exception]:
-  try:
-    return Ok(sessionmaker(engine)())
-  except Exception as e:
-    return Error(e)
-
-
-def start_session(connection_string: string) -> Result[Session, int]:
-  return ꓸ(
-    Ok(connection_string),
-    Log.rinfo('Initializing database engine.'),
-    rbind(sqlalchemy_init_db_engine),
-    Log.rerror('While initializing database engine.'),
-    map_error(λ(
-      str,
-      Log.from_str,
-      Log.format("error"),
-      Log.write,
-      rbind(lambda _: Error(E_INIT_ENGINE)) )),
-
-    rbind(λ(
-      Ok,
-      Log.rinfo('Successfuly initialized database engine.'),
-      Log.rinfo('Initializing database session.'),
-      rbind(sqlalchemy_init_db_session),
-      Log.rerror('While initializing database session.'),
-      map_error(λ(
-        str,
-        Log.from_str,
-        Log.format("error"),
-        Log.write,
-        rbind(lambda _: Error(E_INIT_SESSION)) )),
-      Log.rinfo('Successfuly initialized database session.') )))
+  rbind(λ(
+    Ok,
+    Log.info_message('Initializing database session.'),
+    rbind(try_catch(init_db_session)),
+    Log.info_message('Successfuly initialized database session.'),
+    Log.error_message('While initializing database session.'),
+    Log.exception,
+    map_error(lambda _:E_INIT_SESSION) )))
 
 
 def get_data():
