@@ -9,7 +9,7 @@ from typing import Callable
 from functools import reduce
 
 from expression import result, flip, effect, Result, Ok, Error, curry, compose
-from expression.collections import TypedArray
+from expression.collections import TypedArray, seq
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -28,11 +28,13 @@ load_dotenv()
 
 thenr = result.bind
 rmap = result.map
+smap = seq.map
+filter = compose(seq.filter, seq.of_iterable)
 map_error = result.map_error
 rswap = result.swap
 
 
-E_CREATE_TABLE = 1
+E_PERSIST_TABLE = 1
 E_INIT_ENGINE = 2
 E_INIT_SESSION = 2
 
@@ -70,6 +72,7 @@ And = Infix(lambda fn1, fn2: compose(fn1, fn2))
 Then = Infix(lambda monad, fn: monad.bind(fn))
 Catch = Infix(lambda monad, fn: monad.map_error(fn))
 Map = Infix(lambda functor, fn: functor.map(fn))
+Filter = Infix(lambda sequence, fn: filter(fn)(sequence))
 λ = Infix(add_doc)
 
 
@@ -286,7 +289,7 @@ def try_catch(fn: Callable[[A], B]) -> Callable[[A], Result[B,Exception]]:
 
 
 @curry(1)
-def sqlalchemy_create_table(table: Table, session: Session) -> Result[Session, Exception]:
+def sqlalchemy_persist_table(table: Table, session: Session) -> Result[Session, Exception]:
   try:
     table.create(session.connection().engine)
     return Result.Ok(session)
@@ -294,7 +297,7 @@ def sqlalchemy_create_table(table: Table, session: Session) -> Result[Session, E
     return Result.Error(e)
 
 
-create_table=\
+_persist_table=\
 '''
 Table -> Session -> Result[Session, int]
 
@@ -302,10 +305,10 @@ Create a new table using the given session.
 '''|λ|(lambda table:
         Ok
     |And| Log.info_message(f'Attempting to create table "{table.name}"')
-    |And| thenr(sqlalchemy_create_table(table))
+    |And| thenr(sqlalchemy_persist_table(table))
     |And| Log.error_message(f'While attempting to create table {table.name}.')
     |And| Log.exception
-    |And| map_error(lambda _:E_CREATE_TABLE)
+    |And| map_error(lambda _:E_PERSIST_TABLE)
     |And| Log.info_message(f'Successfuly created table "{table.name}".'))
 
 
@@ -318,7 +321,7 @@ def find_duplicates(cursor, table_name, field, value):
   return rows
 
 
-def insert_rows_into_table(session, table_name, rows):
+def _insert_rows_into_table(session, table_name, rows):
   Log.info(f'attempting to insert data into table "{table_name}".')
 
   try:
@@ -370,7 +373,7 @@ init_db_session = lambda engine:\
   sessionmaker(engine)()
 
 
-start_session =\
+_new_session =\
 '''
 string -> Result[Session, int]
 
@@ -398,7 +401,7 @@ and subsequently initialize the new session.
          |And| map_error(lambda _:E_INIT_SESSION) ))
 
 
-def get_data():
+def _fetch_data_from_google_sheet():
   creds = service_account.Credentials.from_service_account_file(
     SERVICE_ACCOUNT_FILE, scopes=SCOPES)
 
@@ -433,18 +436,68 @@ def apply_transforms(transforms, row):
   ]
 
 
+complete_row =\
+''' TODO
+'''|λ| (lambda r: True)
+
+
+correct_row_errors =\
+''' TODO
+'''|λ| (lambda r: r)
+
+
+fetch_data_from_google_sheet =\
+''' TODO
+'''|λ| (lambda: Ok(seq.of(*[])))
+
+
+persist_table =\
+''' TODO
+'''|λ| (lambda _: lambda _: Ok(None))
+
+
+new_session =\
+'''
+string -> Result[Session, int]
+
+Produce a new database session.
+
+Side Effects:
+Prints progress logs as it attempts and either
+succeed/fails to initialize a databse engine,
+and subsequently initialize the new session.
+''' |λ|(
+  try_catch(sa.create_engine)
+  |And| map_error(lambda _:E_INIT_ENGINE)
+  |And| thenr(try_catch(init_db_session)
+             |And| map_error(lambda _:E_INIT_SESSION) ))
+
+
+insert_rows_into_table =\
+''' TODO
+'''|λ|(lambda table: lambda rows: lambda session: Ok(8))
+
+
+close_session =\
+''' TODO
+'''|λ|(lambda _: Ok(None))
+
+def debug(x):
+  pdb.set_trace()
+  return x
+
 def main():
   return(
     CONNECTION_STRING
-    |Pipe_To| start_session
-    |Pipe_To| create_table(VehicleInventoryTable)
-    |Pipe_To| ( get_data()
-        |Pipe_To| transform_rows
-        |Pipe_To| insert_rows_into_table(VehicleInventoryTable) )
-    |Pipe_To| close_session
-    |Pipe_To| map_error(lambda e:
-        ...# do something
-    ))
+    |Pipe_To| new_session
+    |Pipe_To| persist_table(VehicleInventoryTable)
+    |Then   | (fetch_data_from_google_sheet()
+              |Then| (smap(correct_row_errors)
+                     |And| filter(complete_row)
+                     |And| insert_rows_into_table(VehicleInventoryTable) ))
+    |Catch  | (lambda e: ...)
+    |Then   | close_session
+    |Then   | (lambda _: Ok(1)) )
 
 
 if __name__ == "__main__":
