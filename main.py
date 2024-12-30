@@ -8,7 +8,8 @@ import os.path
 from typing import Callable
 from functools import reduce
 
-from expression import result, effect, Result, Ok, Error, curry, pipe as ꓸ, compose as λ 
+from expression import result, flip, effect, Result, Ok, Error, curry, compose
+from expression.collections import TypedArray
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -16,7 +17,7 @@ import pyodbc
 import sqlalchemy as sa
 from sqlalchemy.orm import (
   DeclarativeBase, sessionmaker, Session, mapped_column, MappedAsDataclass, Mapped)
-from sqlalchemy import select, Engine, Integer, String, Identity, Table
+from sqlalchemy import select, text as as_text, Engine, Integer, String, Identity, Table
 from sqlalchemy.dialects.mssql import TINYINT, VARCHAR, SMALLINT, MONEY
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -25,7 +26,7 @@ from googleapiclient.errors import HttpError
 
 load_dotenv()
 
-rbind = result.bind
+thenr = result.bind
 rmap = result.map
 map_error = result.map_error
 rswap = result.swap
@@ -34,6 +35,43 @@ rswap = result.swap
 E_CREATE_TABLE = 1
 E_INIT_ENGINE = 2
 E_INIT_SESSION = 2
+
+E_ODBC_TABLE_EXISTS = 'f405'
+
+
+class Infix:
+    def __init__(self, function):
+        self.function = function
+    def __ror__(self, other):
+        return Infix(lambda x, self=self, other=other: self.function(other, x))
+    def __or__(self, other):
+        return self.function(other)
+    def __call__(self, value1):
+      return lambda value2: self.function(value1, value2)
+
+class Unary:
+    def __init__(self, function):
+        self.function = function
+    def __ror__(self, other):
+        return Infix(lambda x, self=self, other=other: self.function(other, x))
+    def __or__(self, other):
+        return self.function(other)
+    def __call__(self, value1):
+      return lambda value2: self.function(value1, value2)
+
+
+def add_doc(doc, fn):
+  fn.__doc__ = doc
+  return fn
+
+
+Pipe_To = Infix(lambda x, fn: fn(x))
+And = Infix(lambda fn1, fn2: compose(fn1, fn2))
+Then = Infix(lambda monad, fn: monad.bind(fn))
+Catch = Infix(lambda monad, fn: monad.map_error(fn))
+Map = Infix(lambda functor, fn: functor.map(fn))
+λ = Infix(add_doc)
+
 
 class Base(MappedAsDataclass, DeclarativeBase): pass
 
@@ -59,6 +97,9 @@ class VehicleInventory(Base):
   stock_number                  : Mapped[int] = mapped_column(Integer, Identity(), init=False, nullable=False,
                                                               primary_key=True)
   notes                         : Mapped[str] = mapped_column(VARCHAR(256))
+
+
+VehicleInventoryTable = VehicleInventory.__table__
 
 
 TRANSFORMS = {
@@ -152,9 +193,9 @@ class Log(BaseModel):
   # LogLevel -> Log -> Log
   @staticmethod
   def format(log_level: str) -> Callable[[Log], Log]:
-    return λ( Log.apply_level_prefix(log_level)
-            , Log.apply_level_color(log_level)
-            , )
+    return (
+      Log.apply_level_prefix(log_level)
+      |And| Log.apply_level_color(log_level))
 
 
   @curry(1)
@@ -166,69 +207,68 @@ class Log(BaseModel):
   @effect.result[list, int]()
   @staticmethod
   def write(log: Log) -> Result[Log, int]:
-    ꓸ(log,
-      Log.to_str,
-      print )
-
+    log |Pipe_To| Log.to_str |Pipe_To| print
     yield log
 
     
-  @curry(1)
   @staticmethod
-  def info_message(s: str, result: Result) -> Result:
-    return ꓸ(
-      result,
-      rbind(lambda r:ꓸ(
-        Log.from_str(s),
-        Log.format("info"),
-        Log.write,
-        rmap(lambda _: r) )))
+  def info_message(s: str) -> Callable[[Result], Result]:
+    return\
+      thenr(lambda r: s\
+        |Pipe_To| Log.from_str
+        |Pipe_To| Log.format("info")
+        |Pipe_To| Log.write
+        |Pipe_To| rmap(lambda _: r))
 
 
-  @curry(1)
   @staticmethod
-  def error_message(s: str, res: Result) -> Result:
-    return ꓸ(
-      res,
-      map_error(lambda r:ꓸ(
-        Log.from_str(s),
-        Log.format("error"),
-        Log.write,
-        rbind(lambda _: Error(r)) )))
+  def error_message(s: str) -> Callable[[Result], Result]:
+    return\
+      map_error(lambda r: s\
+        |Pipe_To| Log.from_str
+        |Pipe_To| Log.format("error")
+        |Pipe_To| Log.write
+        |Pipe_To| thenr(lambda _: r |Pipe_To| Error) )
 
 
-  @curry(1)
-  @staticmethod
-  def warning_message(s: str, result: Result) -> Result:
-    return ꓸ(
-      result,
-      rbind(lambda r:ꓸ(
-        Log.from_str(s),
-        Log.format("warning"),
-        Log.write,
-        rmap(lambda _: r) )))
+  def warning_message(s: str) -> Callable[[Result], Result]:
+    return\
+      thenr(lambda r: s\
+        |Pipe_To| Log.from_str
+        |Pipe_To| Log.format("warning")
+        |Pipe_To| Log.write
+        |Pipe_To| rmap(lambda _: r) )
 
 
 # Result[A, E] ->  Result[A, E]
 Log.exception = \
-  map_error(λ(
-   str,
-   Log.from_str,
-   Log.format("error"),
-   Log.write,
-     rbind(lambda _: Error(None)) ))
+  map_error(
+   str
+   |And| Log.from_str
+   |And| Log.format("error")
+   |And| Log.write
+   |And| thenr(lambda _: Error(None)) )
 
 
 # str -> Result[A,E] -> Result[A,E]
-Log.info = λ(Log.from_str, Log.format("info"), Log.write)
+Log.info =(
+  Log.from_str
+  |And| Log.format("info")
+  |And| Log.write)
 
 
 # str -> Result[A,E] -> Result[A,E]
-Log.error = λ(Log.from_str, Log.format("error"), Log.write)
+Log.error =(
+  Log.from_str
+  |And| Log.format("error")
+  |And| Log.write)
 
 
 # str -> Result[A,E] -> Result[A,E]
-Log.warning = λ(Log.from_str, Log.format("error"), Log.write)
+Log.warning =(
+  Log.from_str
+  |And| Log.format("warning")
+  |And| Log.write)
 
 
 # Callable[[], A] -> Result[A,Exception]
@@ -246,7 +286,7 @@ def try_catch(fn: Callable[[A], B]) -> Callable[[A], Result[B,Exception]]:
 
 
 @curry(1)
-def sqlalchemy_create_table(table: Table, session: Session) -> Result[Session, int]:
+def sqlalchemy_create_table(table: Table, session: Session) -> Result[Session, Exception]:
   try:
     table.create(session.connection().engine)
     return Result.Ok(session)
@@ -254,15 +294,19 @@ def sqlalchemy_create_table(table: Table, session: Session) -> Result[Session, i
     return Result.Error(e)
 
 
-def create_table(table: Table) -> Callable[[Session], Result[Session, int]]:
-  return λ(
-    Ok,
-    Log.info_message(f'Attempting to create table "{table.name}"'),
-    rbind(sqlalchemy_create_table(table)),
-    Log.error_message(f'While attempting to create table {table.name}.'),
-    Log.exception,
-    map_error(lambda _:E_CREATE_TABLE),
-    Log.info_message(f'Successfuly created table "{table.name}".') )
+create_table=\
+'''
+Table -> Session -> Result[Session, int]
+
+Create a new table using the given session.
+'''|λ|(lambda table:
+        Ok
+    |And| Log.info_message(f'Attempting to create table "{table.name}"')
+    |And| thenr(sqlalchemy_create_table(table))
+    |And| Log.error_message(f'While attempting to create table {table.name}.')
+    |And| Log.exception
+    |And| map_error(lambda _:E_CREATE_TABLE)
+    |And| Log.info_message(f'Successfuly created table "{table.name}".'))
 
 
 def find_duplicates(cursor, table_name, field, value):
@@ -298,53 +342,60 @@ def insert_rows_into_table(session, table_name, rows):
   return session
 
 
-def check_if_table_exists(conn, table_name):
-  Log.info(f'checking if table "{table_name}" exists.')
+sqlalchemy_execute_statement = (
+  Session.execute
+  |Pipe_To| flip
+  |Pipe_To| curry(1) )
 
-  query = f"SELECT name FROM sys.tables WHERE name = '{table_name}'"
-  try:
-    res = [x for x in conn.execute(sa.text(query)).mappings()]
-  except Exception as e: 
-    Log.error(f'while checking existence of table.\n\t{e}')
-    return None
 
-  msg = f'table already "{table_name}" exists.'
-  if not res:
-    msg = f'table "{table_name}" does not exist.'
-    res = []
+check_if_table_exists =\
+'''
+string -> Result[Session, Error]
 
-  Log.info(msg)
-  return res
+Produce true if a table exists in the database.
+'''|λ| (lambda name:
+      Ok
+  |And| Log.info_message(f'checking if table "{name}" exists.')
+  |And| thenr(try_catch(
+       f"SELECT name FROM sys.tables WHERE name = '{name}'"
+       |Pipe_To| as_text
+       |Pipe_To| sqlalchemy_execute_statement ))
+  |And| rmap(lambda r:\
+       r.mappings()
+       |Pipe_To| TypedArray.of_seq
+       |Pipe_To| TypedArray.is_empty ))
 
 
 init_db_session = lambda engine:\
   sessionmaker(engine)()
 
-# string -> Result[Session, int]
-# 
-# Produce a new database session.
-# 
-# Side Effects:
-# Prints progress logs as it attempts and either
-# succeed/fails to initialize a databse engine,
-# and subsequently initialize the new session.
-start_session = λ(
-  Ok,
-  Log.info_message('Initializing database engine.'),
-  rbind(try_catch(sa.create_engine)),
-  Log.info_message('Successfuly initialized database engine.'),
-  Log.error_message('While initializing database engine.'),
-  Log.exception,
-  map_error(lambda _:E_INIT_ENGINE),
 
-  rbind(λ(
-    Ok,
-    Log.info_message('Initializing database session.'),
-    rbind(try_catch(init_db_session)),
-    Log.info_message('Successfuly initialized database session.'),
-    Log.error_message('While initializing database session.'),
-    Log.exception,
-    map_error(lambda _:E_INIT_SESSION) )))
+start_session =\
+'''
+string -> Result[Session, int]
+
+Produce a new database session.
+
+Side Effects:
+Prints progress logs as it attempts and either
+succeed/fails to initialize a databse engine,
+and subsequently initialize the new session.
+''' |λ|(  Ok
+     |And| Log.info_message('Initializing database engine.')
+     |And| thenr(sa.create_engine |Pipe_To| try_catch)
+     |And| Log.info_message('Successfuly initialized database engine.')
+     |And| Log.error_message('While initializing database engine.')
+     |And| Log.exception
+     |And| map_error(lambda _:E_INIT_ENGINE)
+
+     |And| thenr(
+         Ok
+         |And| Log.info_message('Initializing database session.')
+         |And| thenr(try_catch(init_db_session))
+         |And| Log.info_message('Successfuly initialized database session.')
+         |And| Log.error_message('While initializing database session.')
+         |And| Log.exception
+         |And| map_error(lambda _:E_INIT_SESSION) ))
 
 
 def get_data():
@@ -383,30 +434,17 @@ def apply_transforms(transforms, row):
 
 
 def main():
-  session = ꓸ(
-    start_session(CONNECTION_STRING),
-    lambda x: x.default_value(None) )
-
-  table_names = check_if_table_exists(session, VehicleInventory.__tablename__)
-  if table_names == None:
-    exit(2)
-
-  session = ꓸ(
-    create_table(VehicleInventory.__table__)(session),
-    lambda x: x.default_value(None)) if len(table_names) == 0 else session
-
-  if session == None:
-    exit(3)
-
-  rows = get_data()
-  if rows == None:
-    exit(4)
-
-  transformed_rows = [VehicleInventory(*apply_transforms(TRANSFORMS, r)) for r in rows]
-  
-  insert_rows_into_table(session, VehicleInventory.__tablename__, transformed_rows[:])
-
-  session.close()
+  return(
+    CONNECTION_STRING
+    |Pipe_To| start_session
+    |Pipe_To| create_table(VehicleInventoryTable)
+    |Pipe_To| ( get_data()
+        |Pipe_To| transform_rows
+        |Pipe_To| insert_rows_into_table(VehicleInventoryTable) )
+    |Pipe_To| close_session
+    |Pipe_To| map_error(lambda e:
+        ...# do something
+    ))
 
 
 if __name__ == "__main__":
