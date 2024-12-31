@@ -5,16 +5,18 @@ import pdb
 import re
 import os
 import os.path
+import textwrap
 from typing import Callable
 from functools import reduce
 
-from expression import result, flip, effect, Result, Ok, Error, curry, compose
-from expression.collections import TypedArray, seq
+from expression import result, flip, effect, Result, Ok, Error, curry, compose, identity, Some, Nothing
+from expression.collections import Seq, Block, block
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
 import pyodbc
 import sqlalchemy as sa
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import (
   DeclarativeBase, sessionmaker, Session, mapped_column, MappedAsDataclass, Mapped)
 from sqlalchemy import select, text as as_text, Engine, Integer, String, Identity, Table
@@ -26,32 +28,32 @@ from googleapiclient.errors import HttpError
 
 load_dotenv()
 
-thenr = result.bind
-rmap = result.map
-smap = seq.map
-filter = compose(seq.filter, seq.of_iterable)
-map_error = result.map_error
+
+index = block.item
+choose = block.choose
+empty = block.empty
+shorten = lambda count: lambda s: textwrap.shorten(s, break_long_words=False, width=count)
+then = lambda fn: lambda xs: xs.bind(fn)
+map = lambda fn: lambda xs: xs.map(fn)
+filter = lambda fn: lambda xs: xs.filter(fn)
+map_error = lambda fn: lambda xs: xs.map_error(fn)
 rswap = result.swap
 
 
 E_PERSIST_TABLE = 1
 E_INIT_ENGINE = 2
-E_INIT_SESSION = 2
+E_INIT_SESSION = 3
+E_GOOGLE_CREDENTIALS_FILE = 4
+E_BUILD_GOOGLE_SERVICE = 5
+E_FETCH_GOOGLE_DATA = 6
 
 E_ODBC_TABLE_EXISTS = 'f405'
 
 
-class Infix:
-    def __init__(self, function):
-        self.function = function
-    def __ror__(self, other):
-        return Infix(lambda x, self=self, other=other: self.function(other, x))
-    def __or__(self, other):
-        return self.function(other)
-    def __call__(self, value1):
-      return lambda value2: self.function(value1, value2)
+def lazy(val):
+    return lambda _ = None: val
 
-class Unary:
+class Infix:
     def __init__(self, function):
         self.function = function
     def __ror__(self, other):
@@ -73,7 +75,10 @@ Then = Infix(lambda monad, fn: monad.bind(fn))
 Catch = Infix(lambda monad, fn: monad.map_error(fn))
 Map = Infix(lambda functor, fn: functor.map(fn))
 Filter = Infix(lambda sequence, fn: filter(fn)(sequence))
+Spread = Infix(lambda sequence, fn:
+  fn(**sequence) if isinstance(sequence, dict) else fn(*sequence))
 λ = Infix(add_doc)
+Apply = Infix(lambda monad1, monad_fn: monad_fn.bind(lambda fn: monad1.map(fn)))
 
 
 class Base(MappedAsDataclass, DeclarativeBase): pass
@@ -217,11 +222,11 @@ class Log(BaseModel):
   @staticmethod
   def info_message(s: str) -> Callable[[Result], Result]:
     return\
-      thenr(lambda r: s\
+      then(lambda r: s\
         |Pipe_To| Log.from_str
         |Pipe_To| Log.format("info")
         |Pipe_To| Log.write
-        |Pipe_To| rmap(lambda _: r))
+        |Pipe_To| map(lambda _: r))
 
 
   @staticmethod
@@ -231,16 +236,16 @@ class Log(BaseModel):
         |Pipe_To| Log.from_str
         |Pipe_To| Log.format("error")
         |Pipe_To| Log.write
-        |Pipe_To| thenr(lambda _: r |Pipe_To| Error) )
+        |Pipe_To| then(lambda _: r |Pipe_To| Error) )
 
 
   def warning_message(s: str) -> Callable[[Result], Result]:
     return\
-      thenr(lambda r: s\
+      then(lambda r: s\
         |Pipe_To| Log.from_str
         |Pipe_To| Log.format("warning")
         |Pipe_To| Log.write
-        |Pipe_To| rmap(lambda _: r) )
+        |Pipe_To| map(lambda _: r) )
 
 
 # Result[A, E] ->  Result[A, E]
@@ -250,7 +255,7 @@ Log.exception = \
    |And| Log.from_str
    |And| Log.format("error")
    |And| Log.write
-   |And| thenr(lambda _: Error(None)) )
+   |And| then(lambda _: Error(None)) )
 
 
 # str -> Result[A,E] -> Result[A,E]
@@ -289,137 +294,52 @@ def try_catch(fn: Callable[[A], B]) -> Callable[[A], Result[B,Exception]]:
 
 
 @curry(1)
-def sqlalchemy_persist_table(table: Table, session: Session) -> Result[Session, Exception]:
+def sqlalchemy_persist_item(item, session):
+  logs = empty
   try:
-    table.create(session.connection().engine)
-    return Result.Ok(session)
+    session.add(item)
+    session.commit()
+  except IntegrityError as e:
+    session.rollback()
+    session.commit()
+
+    logs = logs.cons(
+      'Possible duplicate found while writing item to database'
+      |Pipe_To| Log.from_str
+      |Pipe_To| Log.format("warning")
+    ).cons(
+      str(item)
+      |Pipe_To| shorten(74)
+      |Pipe_To| Log.from_str
+      |Pipe_To| Log.format("warning")
+    ).cons(
+      str(e)
+      |Pipe_To| shorten(74)
+      |Pipe_To| Log.from_str
+      |Pipe_To| Log.format("warning")
+    )
+
+    ret = [logs, item, e] |Pipe_To| Block |Pipe_To| Ok
   except Exception as e:
-    return Result.Error(e)
-
-
-_persist_table=\
-'''
-Table -> Session -> Result[Session, int]
-
-Create a new table using the given session.
-'''|λ|(lambda table:
-        Ok
-    |And| Log.info_message(f'Attempting to create table "{table.name}"')
-    |And| thenr(sqlalchemy_persist_table(table))
-    |And| Log.error_message(f'While attempting to create table {table.name}.')
-    |And| Log.exception
-    |And| map_error(lambda _:E_PERSIST_TABLE)
-    |And| Log.info_message(f'Successfuly created table "{table.name}".'))
-
-
-def find_duplicates(cursor, table_name, field, value):
-  query = (
-    f'SELECT * FROM {table_name} '
-    f'WHERE {field} = "{value}"' )
-
-  rows = cursor.execute(query).fetchall()
-  return rows
-
-
-def _insert_rows_into_table(session, table_name, rows):
-  Log.info(f'attempting to insert data into table "{table_name}".')
-
-  try:
-    for row in rows:
-      vin = row.vehicle_identification_number
-      duplicate = session.scalars(
-          select(VehicleInventory).filter_by(vehicle_identification_number=vin)
-      ).all()
-
-      if not duplicate:
-        session.add(row)
-        session.commit()
-
-  except Exception as e:
-    Log.error(
-      f'while attempting to insert data into table {table_name}.\n\t{e}')
-
-    return None
-
-  Log.info(f'successfuly inserted data into table "{table_name}".')
-  return session
-
-
-sqlalchemy_execute_statement = (
-  Session.execute
-  |Pipe_To| flip
-  |Pipe_To| curry(1) )
-
-
-check_if_table_exists =\
-'''
-string -> Result[Session, Error]
-
-Produce true if a table exists in the database.
-'''|λ| (lambda name:
-      Ok
-  |And| Log.info_message(f'checking if table "{name}" exists.')
-  |And| thenr(try_catch(
-       f"SELECT name FROM sys.tables WHERE name = '{name}'"
-       |Pipe_To| as_text
-       |Pipe_To| sqlalchemy_execute_statement ))
-  |And| rmap(lambda r:\
-       r.mappings()
-       |Pipe_To| TypedArray.of_seq
-       |Pipe_To| TypedArray.is_empty ))
+    logs = logs.cons(
+      'While writing item to database'
+      |Pipe_To| Log.from_str
+      |Pipe_To| Log.format("error")
+    )
+    ret = [logs, item, e] |Pipe_To| Block |Pipe_To| Ok
+  finally:
+    logs = logs.cons(
+      'Successfuly wrote item to database'
+      |Pipe_To| Log.from_str
+      |Pipe_To| Log.format("info")
+    )
+    ret = [logs, item, session] |Pipe_To| Block |Pipe_To| Ok
+    
+  return ret
 
 
 init_db_session = lambda engine:\
   sessionmaker(engine)()
-
-
-_new_session =\
-'''
-string -> Result[Session, int]
-
-Produce a new database session.
-
-Side Effects:
-Prints progress logs as it attempts and either
-succeed/fails to initialize a databse engine,
-and subsequently initialize the new session.
-''' |λ|(  Ok
-     |And| Log.info_message('Initializing database engine.')
-     |And| thenr(sa.create_engine |Pipe_To| try_catch)
-     |And| Log.info_message('Successfuly initialized database engine.')
-     |And| Log.error_message('While initializing database engine.')
-     |And| Log.exception
-     |And| map_error(lambda _:E_INIT_ENGINE)
-
-     |And| thenr(
-         Ok
-         |And| Log.info_message('Initializing database session.')
-         |And| thenr(try_catch(init_db_session))
-         |And| Log.info_message('Successfuly initialized database session.')
-         |And| Log.error_message('While initializing database session.')
-         |And| Log.exception
-         |And| map_error(lambda _:E_INIT_SESSION) ))
-
-
-def _fetch_data_from_google_sheet():
-  creds = service_account.Credentials.from_service_account_file(
-    SERVICE_ACCOUNT_FILE, scopes=SCOPES)
-
-  values = []
-  try:
-    service = build("sheets", "v4", credentials=creds)
-    sheet = service.spreadsheets()
-    values = (
-      sheet.values()
-           .get(spreadsheetId=SPREADSHEET_ID, range=RANGE)
-           .execute()
-           .get("values", []) )
-
-  except HttpError as err:
-    Log.error(err)
-    return None
-
-  return values
 
 
 def list_get(l, i):
@@ -441,19 +361,64 @@ def debug(x):
   return x
 
 
-complete_row =\
-''' TODO
-'''|λ| (lambda r: True)
+pad_row =\
+''' Iterable[string] -> Iterable[string]
+
+pad the end of the array with empty strings from the last element
+to the 17th element.
+'''|λ| (lambda r: [
+    list_get(r, i) for i in range(17)])
 
 
-correct_row_errors =\
-''' TODO
-'''|λ| (lambda r: r)
+apply_transformations =\
+''' Iterable[string] -> Iterable[string]
+'''|λ| (lambda transforms: lambda r: [
+    reduce((lambda acc, fn: fn(acc)) ,transforms.get(i, [lambda _:_]) + transforms[-1], c)
+    for i, c in enumerate(r)])
+
+
+load_google_credentials_from_file =\
+''' string -> Result[GoogleCredentials, Exception]
+
+Load credentials used to access google api from the given file.
+'''|λ| try_catch(lambda filename:
+  service_account.Credentials.from_service_account_file(filename, scopes=SCOPES) )
+
+
+build_google_service_using_credentials =\
+''' GoogleCredentials -> Result[ServiceAccount, Exception]
+'''|λ| try_catch(lambda creds: build("sheets", "v4", credentials=creds))
 
 
 fetch_data_from_google_sheet =\
-''' TODO
-'''|λ| (lambda: Ok(seq.of(*[])))
+''' string -> string -> GoogleService -> Result[List[Tuple]], Error]
+
+Fetch the set of cells selected by `range_str` from the google sheet
+with the given `sheet_id`, returning the result as a list of tuples
+where each tuple contains the data for a single row.
+'''|λ| curry(1)(lambda sheet_id, range_str:
+  try_catch(lambda service:
+    service.spreadsheets()
+           .values()
+           .get(spreadsheetId=sheet_id, range=range_str)
+           .execute()
+           .get("values", []) ))
+
+
+fetch_data_from_source =\
+''' () -> Result[Block, Exception]
+
+Authenticate and setup the google api, then fetch and return the
+inventory data found in the google sheets document.
+'''|λ| (lambda: 
+  SERVICE_ACCOUNT_FILE
+  |Pipe_To| load_google_credentials_from_file
+  |Catch  | lazy(Error(E_BUILD_GOOGLE_SERVICE))
+  |Then   | build_google_service_using_credentials
+  |Catch  | lazy(Error(E_GOOGLE_CREDENTIALS_FILE))
+  |Then   | (RANGE |Pipe_To| fetch_data_from_google_sheet(SPREADSHEET_ID))
+  |Catch  | lazy(Error(E_FETCH_GOOGLE_DATA))
+  |Map    | Block )
 
 
 @curry(1)
@@ -466,14 +431,13 @@ def sqlalchemy_persist_table(table: Table, session: Session) -> Result[Session, 
 
 
 persist_table =\
-'''
-Table -> Session -> Result[Session, int]
+''' Table -> Session -> Result[Session, int]
 
 Persist the given table to the database represented
 by `session`.
 '''|λ|(lambda table:
-  |And| sqlalchemy_persist_table(table)
-  |And| map_error(lambda _:E_PERSIST_TABLE) )
+  sqlalchemy_persist_table(table)
+  |And| map_error(lazy(E_PERSIST_TABLE) ))
 
 
 new_session =\
@@ -489,31 +453,64 @@ and subsequently initialize the new session.
 ''' |λ|(
   try_catch(sa.create_engine)
   |And| map_error(lambda _:E_INIT_ENGINE)
-  |And| thenr(try_catch(init_db_session)
+  |And| then(try_catch(init_db_session)
              |And| map_error(lambda _:E_INIT_SESSION) ))
 
 
-insert_rows_into_table =\
-''' TODO
-'''|λ|(lambda table: lambda rows: lambda session: Ok(8))
+apply_actions_to_session =\
+'''Block[ Callable[[Sesssion]
+        , Result[ (Block[Log], VehicleInventory, Session)
+                , (Block[Log], VehicleInventory, Exception)]]]
+-> Block[(Block[Log], VehicleInventory, Session), (Block[Log], VehicleInventory, Exception)]
+'''|λ|(lambda xs: lambda s: xs |Map| (lambda x: x(s).merge()))
+
+
+persist_inventory_item =\
+'''VehicleInventory
+-> Session
+-> Result[(Block[Log], VehicleInventory, Session), (Block[Log], VehicleInventory, Exception)]
+'''|λ|(lambda r: sqlalchemy_persist_item(r))
+
+
+new_inventory_item =\
+''' 
+'''|λ|(lambda r: VehicleInventory(*r))
 
 
 close_session =\
 ''' TODO
 '''|λ|(lambda _: Ok(None))
 
+
+copy_data_from_source_to_database =\
+'''Session
+-> Result[ Block[ (Block[Log], VehicleInventory, Session)
+                , (Block[Log], VehicleInventory, Exception)]
+         , int]
+moves the data from the source to database
+'''|λ|(fetch_data_from_source()
+       |Map| map(pad_row
+                |And| apply_transformations(TRANSFORMS)
+                |And| new_inventory_item
+                |And| persist_inventory_item )
+       |Map| apply_actions_to_session)
+
+
 def main():
   return(
     CONNECTION_STRING
     |Pipe_To| new_session
-    |Pipe_To| persist_table(VehicleInventoryTable)
-    |Then   | (fetch_data_from_google_sheet()
-              |Then| (smap(correct_row_errors)
-                     |And| filter(complete_row)
-                     |And| insert_rows_into_table(VehicleInventoryTable) ))
-    |Catch  | (lambda e: ...)
+    |Then   | persist_table(VehicleInventoryTable)
+    |Apply  | copy_data_from_source_to_database
+    |Map    | map(lambda t:
+                   t |Pipe_To| index(0)
+                     |Pipe_To| map(Log.write)
+                     |Pipe_To| lazy(index(2)(t)) )
+    |Map    | choose(lambda x: Some(x) if isinstance(x, Session) else Nothing)
+    |Map    | (lambda x: set(x.dict()).pop())
+    |Catch  | (lambda e: e |Pipe_To| Ok)
     |Then   | close_session
-    |Then   | (lambda _: Ok(1)) )
+    |Then   | (lambda e: e |Pipe_To| Ok) )
 
 
 if __name__ == "__main__":
