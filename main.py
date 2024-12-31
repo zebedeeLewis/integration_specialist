@@ -436,6 +436,11 @@ def apply_transforms(transforms, row):
   ]
 
 
+def debug(x):
+  pdb.set_trace()
+  return x
+
+
 complete_row =\
 ''' TODO
 '''|λ| (lambda r: True)
@@ -451,9 +456,24 @@ fetch_data_from_google_sheet =\
 '''|λ| (lambda: Ok(seq.of(*[])))
 
 
+@curry(1)
+def sqlalchemy_persist_table(table: Table, session: Session) -> Result[Session, Exception]:
+  try:
+    table.create(session.connection().engine)
+    return Result.Ok(session)
+  except Exception as e:
+    return Result.Error(e)
+
+
 persist_table =\
-''' TODO
-'''|λ| (lambda _: lambda _: Ok(None))
+'''
+Table -> Session -> Result[Session, int]
+
+Persist the given table to the database represented
+by `session`.
+'''|λ|(lambda table:
+  |And| sqlalchemy_persist_table(table)
+  |And| map_error(lambda _:E_PERSIST_TABLE) )
 
 
 new_session =\
@@ -481,10 +501,6 @@ insert_rows_into_table =\
 close_session =\
 ''' TODO
 '''|λ|(lambda _: Ok(None))
-
-def debug(x):
-  pdb.set_trace()
-  return x
 
 def main():
   return(
